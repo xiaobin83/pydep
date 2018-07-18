@@ -13,15 +13,21 @@ from git.cmd import Git
 
 from dirsync import sync 
 
-logging.basicConfig(level=logging.INFO)
-
-
 pydepFilename = '.pydep-git'
 pydepRepoPath = '.pydep-gitrepo'
 pydepTargetInfo = '.pydep-gitinfo'
 
 
 class RepoNotFoundError(Exception):
+	def __init__(self, repoName):
+		pass
+class RepoIsNotBareError(Exception):
+	def __init__(self, repoName):
+		pass
+class RepoInvalidError(Exception):
+	def __init__(self, repoName, innerException):
+		pass
+class RepoRevNotFound(Exception):
 	pass
 
 class GitProgress(RemoteProgress):
@@ -34,7 +40,7 @@ def setupArgs():
 	parser = argparse.ArgumentParser(description='setting up dependencies of project')
 	parser.add_argument('--init', action='store_true')	
 	parser.add_argument('--update', dest='update')
-	parser.add_argument('--rev', dest='rev', default='HEAD')
+	parser.add_argument('--lock', dest='lock')
 	return parser.parse_args()
 
 def getPydepIgnoreMatcher():
@@ -64,7 +70,7 @@ def init():
 				]
 			}
 		}
-		json.dump(pydepGit, open('.pydep-git', mode='w'), indent=4)
+		json.dump(pydepGit, open(pydepFilename, mode='w'), indent=4)
 	if not os.path.exists(pydepRepoPath):
 		os.mkdir(pydepRepoPath)
 
@@ -87,29 +93,51 @@ def init():
 def readConfig():
 	with open(pydepFilename, mode='r') as f:
 		return json.load(f)
-
+def writeConfig(config):
+	json.dump(config, open(pydepFilename, mode='w'), indent=4)
 
 def clone(url, branch, path):
-	repo = Repo.clone_from(url, path, branch=branch, progress=GitProgress(), bare=True, depth=1)
+	print >> sys.stdout, 'cloning ' + url + ' ' + branch
+	repo = Repo.clone_from(url, path, branch=branch, bare=True, depth=1)
 	return repo
 
-def errRepo(name, path):
-	pass
+def ensureCommitExists(repo, branch, rev, reentry=False):
+	if rev == 'HEAD':
+		print >> sys.stdout, 'rev at HEAD, fetching from remote branch ' + branch
+		repo.remotes.origin.fetch(branch, depth=1)
+	try:
+		commit = repo.iter_commits(rev=rev, max_count=1).next()
+	except:
+		if reentry:
+			raise RepoRevNotFound()
+		print >> sys.stdout, 'commit ' + rev + ' not exists, try fetch all commits'
+		repo.remotes.origin.fetch(branch, unshallow=True)
+		ensureCommitExists(repo, branch, rev, True)	
 
+def repoFrom(repoPath):
+	try:
+		repo = Repo(repoPath)
+	except Exception, e:
+		raise RepoInvalidError(repoName, e) 
+	if not repo.bare:
+		raise RepoIsNotBareError(repoName)
+	return repo
 
-def cloneIfNeeded(config, repoName, repoRev):
+def cloneIfNeeded(config, repoName):
 	clonePath = os.path.join(pydepRepoPath, repoName)
+	c = config[repoName]
+	rev = c.get('rev', 'HEAD')
 	if not os.path.exists(clonePath):
-		return clone(config[repoName]['repo'], config[repoName]['branch'], clonePath)
+		repo = clone(c['repo'], c['branch'], clonePath)
+		if rev != 'HEAD':
+			ensureCommitExists(repo, c['branch'], rev)
 	else:
-		repo = Repo(clonePath)
-		if not repo.bare:
-			errRepo(repoName, clonePath)
-		return repo
+		repo = repoFrom(clonePath)
+		ensureCommitExists(repo, c['branch'], rev)
+	return repo
 
 
 def checkout(repo, rev, branch, packages):
-	git = Git(repo.git_dir)
 	workTreePath = tempfile.mkdtemp('_pydep')
 	repo.git(work_tree=workTreePath).checkout(f=True)
 	return workTreePath
@@ -119,7 +147,7 @@ def sparseCheckout(repo, config, repoName):
 		raise RepoNotFoundError()
 
 	with repo.config_writer() as w:
-		w.set('core', 'sparsecheckout', True)
+		w.set('core', 'sparsecheckout', 'true')
 
 	sparseConfigPath = os.path.join(repo.git_dir, 'info', 'sparse-checkout')
 
@@ -129,10 +157,15 @@ def sparseCheckout(repo, config, repoName):
 	for package in packages:
 		path = package['path']
 		sparseDirs.append(path + '/*\n')
-	with open(sparseConfigPath, 'w+') as f:
+	with open(sparseConfigPath, 'w') as f:
 		f.writelines(sparseDirs)
+
+	if c.has_key('rev'):
+		rev = c['rev']
+	else:
+		rev = 'HEAD'
 	
-	return checkout(repo, config[repoName]['branch'], config[repoName]['rev'], config[repoName]['packages'])
+	return checkout(repo, c['branch'], rev, c['packages'])
 
 
 def removeDir(path):
@@ -146,23 +179,43 @@ def copyToTarget(tempWorkTreePath, repo, config, repoName):
 		target = package['target']
 		srcDir = os.path.join(tempWorkTreePath, path)
 		dstDir = os.path.join(os.getcwd(), target)
-		sync(srcDir, dstDir, 'sync', verbose=True, create=True)
+		sync(srcDir, dstDir, 'sync', create=True)
 		
 
-def update(config, repoName, repoRev):
+def update(config, repoName):
 	if not config.has_key(repoName):
 		raise RepoNotFoundError() 
-	repo = cloneIfNeeded(config, repoName, repoRev)
+	repo = cloneIfNeeded(config, repoName)
 	tempWorkTreePath = sparseCheckout(repo, config, repoName)
 	copyToTarget(tempWorkTreePath, repo, config, repoName)
 	removeDir(tempWorkTreePath)	
 
+def lockRepo(repoPath):
+	repo = repoFrom(repoPath)
+	commit = repo.iter_commits(max_count=1).next()
+	return commit.hexsha
+
+
+def lock(config, repoName):
+	if not config.has_key(repoName):
+		raise RepoNotFoundError(repoName)
+	c = config[repoName]
+
+	rev = c.get('rev', 'HEAD')
+	if rev == 'HEAD':
+		repoPath = os.path.join(pydepRepoPath, repoName)
+		rev = lockRepo(repoPath)
+		c['rev'] = rev
+		writeConfig(config)
+	
 
 def main(args):
 	if args.init:
 		init()
 	elif args.update is not None:
-		update(readConfig(), args.update, args.rev)
+		update(readConfig(), args.update)
+	elif args.lock:
+		lock(readConfig(), args.lock)
 
 if __name__ == '__main__':
 	args = setupArgs()

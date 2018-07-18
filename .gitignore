@@ -108,6 +108,4 @@ venv.bak/
 
 # pydep
 .pydep-gitrepo/
-
-# pydep
-.pydep-gitrepo/
+Tools/
