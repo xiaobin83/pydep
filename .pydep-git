@@ -1,0 +1,13 @@
+{
+	"ShaderForge": {
+		"repo": "https://github.com/xiaobin83/ShaderForge.git", 
+		"packages": [
+			{
+				"path": "Shader Forge/Assets/ShaderForge", 
+				"target": "Tools/ShaderForge"
+			}
+		],
+		"rev": "HEAD", 
+		"branch": "master"
+	}
+}
