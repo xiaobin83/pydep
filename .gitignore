@@ -107,5 +107,6 @@ venv.bak/
 .vscode/
 
 # pydep
+.pydep-git
 .pydep-gitrepo/
 Tools/
