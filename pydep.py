@@ -179,7 +179,7 @@ def writeConfig(config):
 
 def clone(url, branch, path):
 	print >> sys.stdout, 'cloning ' + url + ' ' + branch
-	repo = Repo.clone_from(url, path, branch=branch, bare=True, depth=1)
+	repo = Repo.clone_from(url, path, branch=branch, bare=True, depth=1, recurse_submodules=True)
 	return repo
 
 def ensureCommitExists(repo, branch, rev, reentry=False):
