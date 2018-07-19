@@ -78,7 +78,7 @@ def setupUpdateArgs():
 	return parser
 
 def getPydepIgnoreMatcher():
-	return re.compile(r'^\s*\\'+pydepRepoPath+r'/\s*$')
+	return re.compile(r'^\s*'+pydepRepoPath+r'/\s*$')
 
 def matchIgnore(line):
 	m = getPydepIgnoreMatcher()
