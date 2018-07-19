@@ -40,6 +40,13 @@ class RepoPackageTargetExistsError(Exception):
 	def __str__(self):
 		return '"{0}" at repo "{1}" package "{2}"'.format(self.packageTarget, self.repoName, self.packagePath)
 
+class RepoRootPackageExistsError(Exception):
+	pass
+class RepoNonRootPackageExistsError(Exception):
+	pass
+class UpdateAllCommandHasRevParameterError(Exception):
+	pass
+
 class GitProgress(RemoteProgress):
 	def update(self, op_code, cur_count, max_count=None, message=''):
 		sys.stdout.write(','.join([op_code, cur_count, max_count, cur_count / (max_count or 100.0), message or 'NO MESSAGE']))
@@ -68,13 +75,13 @@ def setupAddPackageArgs():
 
 def setupLockArgs():
 	parser = argparse.ArgumentParser(prog='lock')
-	parser.add_argument('--name', dest='name', required=True)
+	parser.add_argument('--name', dest='name')
 	return parser
 
 def setupUpdateArgs():
 	parser = argparse.ArgumentParser(prog='update')
-	parser.add_argument('--name', dest='name', required=True)
-	parser.add_argument('--rev', dest='rev', default=None)
+	parser.add_argument('--name', dest='name')
+	parser.add_argument('--rev', dest='rev')
 	return parser
 
 def getPydepIgnoreMatcher():
@@ -148,10 +155,18 @@ def addPackage(args):
 	if not config.has_key(name):
 		raise RepoNotFoundError()
 	packages = config[name].get('packages', [])
-	packages.append({
+	package = {
 		u'path':unicode(path),
 		u'target': unicode(target)
-	})
+	}
+	if path == '<ROOT>':
+		if len(packages) > 0:
+			raise RepoNonRootPackageExistsError()
+	else:
+		for p in packages:
+			if p['path'] == '<ROOT>':
+				raise RepoRootPackageExistsError()
+		packages.append(package)
 	checkPackages(config)
 	config[name]['packages'] = packages
 	writeConfig(config)
@@ -204,26 +219,38 @@ def checkRepo(repoName, c, rev):
 	return repo
 
 
-def checkout(repo, rev, packages):
+def checkout(repo, rev):
 	workTreePath = tempfile.mkdtemp('_pydep')
 	repo.git(work_tree=workTreePath).checkout(f=True)
 	return workTreePath
 
 def sparseCheckout(repo, c, rev):
-	with repo.config_writer() as w:
-		w.set('core', 'sparsecheckout', 'true')
 
 	sparseConfigPath = os.path.join(repo.git_dir, 'info', 'sparse-checkout')
 
 	packages = c['packages']
 	sparseDirs = []
+	completeCheckout = False
 	for package in packages:
 		path = package['path']
+		if path == '<ROOT>':
+			completeCheckout = True
+			break
 		sparseDirs.append(path + '/*\n')
-	with open(sparseConfigPath, 'w') as f:
-		f.writelines(sparseDirs)
+	if not completeCheckout:
+		with repo.config_writer() as w:
+			w.set('core', 'sparsecheckout', 'true')
+		with open(sparseConfigPath, 'w') as f:
+			f.writelines(sparseDirs)
+	else:
+		with repo.config_writer() as w:
+			w.set('core', 'sparsecheckout', 'false')
+		try:
+			os.unlink(sparseConfigPath)
+		except:
+			pass
 
-	return checkout(repo, rev, c['packages'])
+	return checkout(repo, rev)
 
 
 def removeDir(path):
@@ -231,6 +258,18 @@ def removeDir(path):
 
 def copyToTarget(tempWorkTreePath, c):
 	packages = c['packages']
+
+	# has complete checkout?
+	for package in packages:
+		path = package['path']
+		if path == '<ROOT>':
+			target = package['target']
+			srcDir = tempWorkTreePath
+			dstDir = os.path.join(os.getcwd(), target)
+			sync(srcDir, dstDir, 'sync', create=True)
+			return
+
+	# sparse checkout
 	for package in packages:
 		path = package['path']
 		target = package['target']
@@ -239,12 +278,10 @@ def copyToTarget(tempWorkTreePath, c):
 		sync(srcDir, dstDir, 'sync', create=True)
 		
 
-def update(config, args):
-	repoName = args.name
+def update(config, repoName, rev):
 	c = config.get(repoName)
 	if c is None:
 		raise RepoNotFoundError() 
-	rev = args.rev
 	if rev is None:
 		rev = c.get('rev', 'HEAD') 
 	repo = checkRepo(repoName, c, rev)
@@ -258,14 +295,14 @@ def lockRepo(repoPath):
 	return commit.hexsha
 
 
-def lock(config, args):
-	repoName = args.name
+def lock(config, repoName):
 	c = config.get(repoName)
 	if c is None:
 		raise RepoNotFoundError()
 	repoPath = os.path.join(pydepRepoPath, repoName)
 	rev = lockRepo(repoPath)
 	c['rev'] = rev
+	print >> sys.stdout, 'lock {0} at commit {1}'.format(repoName, rev)
 	writeConfig(config)
 	
 
@@ -276,11 +313,23 @@ def main(cmd, args):
 	elif cmd == 'update':
 		p = setupUpdateArgs()
 		args = p.parse_args(args)
-		update(readConfig(), args)
+		config = readConfig()
+		if args.name is None:
+			if args.rev is not None:
+				raise UpdateAllCommandHasRevParameterError()
+			for repoName, c in config.iteritems():
+				update(config, repoName, None)
+		else:
+			update(config, args.name, args.rev)
 	elif cmd == 'lock':
 		p = setupLockArgs()
 		args = p.parse_args(args)
-		lock(readConfig(), args)
+		config = readConfig()
+		if args.name is None:
+			for repoName, c in config.iteritems():
+				lock(config, repoName)
+		else:
+			lock(config, args.name)
 	elif cmd == 'add':
 		p = setupAddArgs()
 		args = p.parse_args(args)
